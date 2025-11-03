@@ -12,4 +12,4 @@ In the context of triage decisions, it has been argued that patients who fulfill
 
 The repository includes the folder for the raw (`triage_2023.csv`) and altered data (`df_conj.R`).
 
-The complete analysis including the code for the graphs is provided in the quarto document `analysis.qmd`. `helper_functions.R`` contains functions used in the analysis.
+The complete analysis including the code for the graphs is provided in the quarto document `analysis.qmd`. `helper_functions.R` contains functions used in the analysis.
