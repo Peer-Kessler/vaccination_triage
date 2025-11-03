@@ -1,4 +1,4 @@
-# GitHub Respository for the Article "Vaccination status in triage decisions: Identifying effects of punishment and in-group biases"
+# GitHub Respository for the Article "Vaccination status in triage decisions: Identifying effects of punishment and in-group bias"
 
 Author: Peer Keßler, M.A.
 
