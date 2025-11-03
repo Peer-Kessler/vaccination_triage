@@ -1,0 +1,683 @@
+---
+title: "Analysis"
+format: html
+---
+
+# Preparation
+
+```{r}
+#| label: setup
+#| echo: false
+#| message: false
+#| warning: false
+#| include: false
+
+source(file = "helper_functions.R")
+
+install_and_load(c("broom",
+                   "broom.mixed",
+                   "janitor",
+                   "lme4",
+                   "lmerTest",
+                   "gridExtra",
+                   "ggthemes",
+                   "modelsummary",
+                   "gt",
+                   "officer",
+                   "tidyverse")
+                 )
+
+df_triage <- 
+  read_csv2(file = "data/triage_2023.csv") %>% 
+  mutate(ID = 1:length(.$CASE))
+
+if (file.exists("data/df_conj.R")) {
+  
+  df_conj <- dget(file = "data/df_conj.R")
+  
+} else {
+  
+  df_conj <- 
+  df_triage %>% 
+  filter(!is.na(IV01_01)) %>% 
+  conj()
+
+  dput(x = df_conj,
+       file = "data/df_conj.R")
+  
+}
+
+cache <- 
+  df_triage %>% 
+  select(ID, EX01:EX10) %>% 
+  pivot_longer(cols = contains("EX"),
+               values_to = "Choice",
+               names_to = "vig_set") %>% 
+  mutate(vig_set = str_replace(vig_set, "^[A-Za-z]+0*", ""),
+         vig_set = as.numeric(vig_set)) %>% 
+  add_case(ID = rep(unique(.$ID),
+                    each = 10),
+           Choice = NA,
+           vig_set = rep(1:10, 
+                         times = length(unique(.$ID))
+                         )
+           ) %>% 
+  arrange(ID, vig_set) %>% 
+  mutate(vig_profile = rep(1:2,
+                           times = length(unique(.$ID)) * 10
+                           )
+         ) %>% 
+  group_by(ID, vig_set) %>% 
+  fill(Choice) %>% 
+  ungroup() %>% 
+  mutate(vig_choice = case_when(Choice == vig_profile ~ 1,
+                                Choice == 3 ~ 3,
+                                Choice != vig_profile ~ 0)) %>% 
+  select(!Choice)
+
+df_triage_clean <- 
+  left_join(x = cache,
+            y = df_conj) %>% 
+  clean_names() %>% 
+  mutate(across(.cols = !contains("vig_"),
+                .fns = as_factor
+                )
+         ) %>% 
+  rename_with(.cols = !matches('vig_|id'),
+              ~ paste0("vig_", .x)
+              )
+
+df_triage_further <- 
+  df_triage %>%
+  transmute(id = as_factor(ID),
+            consent = if_else(condition = PR04 == 1,
+                              true = T,
+                              false = F
+                              ),
+            bot_1 = if_else(condition = BF01 == 4,
+                            true = T,
+                            false = F
+                            ),
+            bot_2 = if_else(condition = BF04 == 4,
+                            true = T,
+                            false = F
+                            ),
+            bot_3 = if_else(condition = BF03 == 6,
+                            true = T,
+                            false = F
+                            ),
+            bot_all = if_else(condition = (is.na(bot_1) | is.na(bot_2) | is.na(bot_3)) | !bot_3,
+                              true = F,
+                              false = T
+                              ),
+            vacc_nr = FU09_01,
+            vacc = if_else(condition = FU09_01 > 0,
+                           true = T,
+                           false = F),
+            gender = factor(SD03,
+                            levels = 1:3,
+                            labels = c("female",
+                                       "male",
+                                       "diverse")
+                            ),
+            year = SD04_01,
+            month = SD05,
+            age = if_else(month < 8,
+                          true = 2023 - year,
+                          false = (2023 - year) - 1),
+            educ = SD06_01,
+            time = as.numeric(df_triage$LASTDATA - df_triage$STARTED),
+            time = time/60
+            ) 
+  
+df_triage_cache <- 
+  df_triage_clean %>% 
+  left_join(df_triage_further,
+            by = "id")
+
+df_triage_final <- 
+  df_triage_cache %>% 
+    mutate(vig_age = factor(vig_age,
+                          levels = c("25 years old","50 years old","75 years old")
+                          ),
+         vig_children = factor(vig_children,
+                          levels = c("Has no children","Has children")
+                          ),
+         vig_chance_of_survival_with_ventilation = factor(vig_chance_of_survival_with_ventilation,
+                          levels = c("20% chance of survival","50% chance of survival","80% chance of survival")
+                          ),
+         vig_ventilation_status = factor(vig_ventilation_status,
+                          levels = c("Not ventilated yet","Is already ventilated")
+                          ),
+         vig_disability = factor(vig_disability,
+                          levels = c("Has no disability","Has a disability")
+                          ),
+         vig_volunteer_work = factor(vig_volunteer_work,
+                          levels = c("Does not volunteer work","Does volunteer work")
+                          ),
+         vig_vaccination_status = factor(vig_vaccination_status,
+                          levels = c("Is not vaccinated","Is vaccinated")
+                          ),
+         vig_weight = factor(vig_weight,
+                          levels = c("Not overweight","Overweight")
+                          ),
+         vacc = factor(
+      vacc,
+      levels = c(FALSE, TRUE),
+      labels = c("No", "Yes")
+    ),
+    vacc_nr = vacc_nr
+    )
+
+rm(list=setdiff(ls(), "df_triage_final"))
+```
+
+# Sample
+
+```{r}
+#| label: sample
+
+df_sample <-
+  df_triage_final %>%
+  select("id", "bot_all", "time", "vacc", "gender", "age", "educ", "vacc_nr") %>%
+  unique() %>%
+  mutate(
+    time = if_else(time >= 5,
+      true = TRUE,
+      false = FALSE
+    ),
+    vacc = vacc,
+    vacc_na = if_else(is.na(vacc),
+      true = FALSE,
+      false = TRUE
+    ),
+    all_exclusion = if_else(!bot_all | !time | !vacc_na,
+      true = TRUE,
+      false = FALSE
+    )
+  )
+
+character_gender <-
+  df_sample %>%
+  filter(!all_exclusion) %>%
+  mutate(
+    attr = factor(gender,
+      levels = c(
+        "Gender",
+        "male",
+        "female",
+        "diverse",
+        "missing"
+      ),
+      labels = c(
+        "Gender",
+        "Male",
+        "Female",
+        "Diverse",
+        "Missing"
+      )
+    ),
+    attr = replace_na(attr, "Missing")
+  ) %>%
+  count(attr) %>%
+  mutate(prop = round(n / sum(n) * 100, 1)) %>%
+  add_case(
+    attr = "Gender",
+    n = NA,
+    prop = NA,
+    .before = 1
+  ) %>%
+  mutate(across(.cols = everything(), as.character))
+
+character_age <-
+  df_sample %>%
+  filter(!all_exclusion) %>%
+  summarise(
+    mean = round(mean(age, na.rm = TRUE), 1),
+    sd = round(sd(age, na.rm = TRUE), 1),
+    n_missing = sum(is.na(age))
+  ) %>%
+  transmute(
+    attr = "Age",
+    n = paste0(mean, " (", sd, ")"),
+    prop = ""
+  ) %>%
+  add_case(
+    attr = "Missing",
+    n = as.character(nrow(filter(df_sample, !all_exclusion & is.na(age)))),
+    prop = as.character(round(nrow(filter(df_sample, !all_exclusion & is.na(age))) / (nrow(filter(df_sample, !all_exclusion))) * 100, 1))
+  )
+
+character_educ <-
+  df_sample %>%
+  filter(!all_exclusion) %>%
+  summarise(
+    mean = round(mean(educ, na.rm = TRUE), 1),
+    sd = round(sd(educ, na.rm = TRUE), 1),
+    n_missing = sum(is.na(educ))
+  ) %>%
+  transmute(
+    attr = "Education (years)",
+    n = paste0(mean, " (", sd, ")"),
+    prop = ""
+  ) %>%
+  add_case(
+    attr = "Missing",
+    n = as.character(nrow(filter(df_sample, !all_exclusion & is.na(educ)))),
+    prop = as.character(round(nrow(filter(df_sample, !all_exclusion & is.na(educ))) / (nrow(filter(df_sample, !all_exclusion))) * 100, 1))
+  )
+
+bind_rows(character_gender, character_age, character_educ) %>%
+  rename(
+    `Baseline characteristic` = attr,
+    `Frequency or mean (SD)` = n,
+    `Relative frequency in %` = prop
+  )
+```
+
+# Decriptives -Figure 1
+
+```{r}
+#| label: fig1
+
+fig_1a <-
+  df_triage_final %>%
+  filter(
+    vig_set <= 5,
+    time >= 5,
+    bot_all,
+    !is.na(vacc)
+  ) %>%
+  mutate(vacc = factor(vacc,
+    levels = c("No", "Yes"),
+    labels = c("Unvaccinated", "Vaccinated")
+  )) %>%
+  select("id", "vacc") %>%
+  unique() %>%
+  count(vacc) %>%
+  mutate(
+    prop = n / sum(n),
+    prop_text = paste0(round(prop, 3) * 100, "%")
+  ) %>%
+  ggplot(mapping = aes(
+    x = vacc,
+    y = prop
+  )) +
+  geom_bar(
+    stat = "identity",
+    color = "darkgrey",
+    fill = "darkgrey"
+  ) +
+  geom_text(
+    mapping = aes(
+      label = prop_text,
+      y = prop + 0.03
+    ),
+    family = "serif",
+    color = "black",
+    size = 9 / .pt
+  ) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "A)") +
+  theme_minimal() +
+  theme(
+    text = element_text(
+      family = "serif",
+      size = 12
+    ),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    plot.title.position = "plot"
+  )
+
+fig_1b <-
+  df_triage_final %>%
+  filter(
+    vig_set <= 5,
+    time >= 5,
+    bot_all,
+    !is.na(vacc)
+  ) %>%
+  select("id", "vacc_nr") %>%
+  unique() %>%
+  count(vacc_nr) %>%
+  mutate(
+    prop = n / sum(n),
+    prop_text = paste0(round(prop, 3) * 100, "%")
+  ) %>%
+  ggplot(mapping = aes(
+    x = vacc_nr,
+    y = prop
+  )) +
+  geom_bar(
+    stat = "identity",
+    color = "darkgrey",
+    fill = "darkgrey"
+  ) +
+  geom_text(
+    mapping = aes(
+      label = prop_text,
+      y = prop + 0.01
+    ),
+    family = "serif",
+    color = "black",
+    size = 9 / .pt
+  ) +
+  scale_y_continuous(labels = scales::percent) +
+  scale_x_continuous(breaks = 0:6) +
+  labs(title = "B)") +
+  theme_minimal() +
+  theme(
+    text = element_text(
+      family = "serif",
+      size = 12
+    ),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    plot.title.position = "plot"
+  )
+
+gridExtra::grid.arrange(fig_1a, fig_1b, ncol = 2)
+```
+
+# Models
+
+## Figure 2
+
+```{r}
+#| label: fig2
+
+df_triage_final %>%
+  filter(
+    vig_set <= 5,
+    time >= 5,
+    bot_all,
+    !is.na(vacc)
+  ) %>%
+  mutate(
+    vacc = factor(vacc,
+      levels = c("No", "Yes"),
+      labels = c("Unvaccinated", "Vaccinated")
+    ),
+    vig_vaccination_status = factor(vig_vaccination_status,
+      levels = c("Is not vaccinated", "Is vaccinated"),
+      labels = c("Unvaccinated", "Vaccinated")
+    )
+  ) %>%
+  split(.$vacc) %>%
+  map(~
+    lmer(
+      formula = vig_choice ~ vig_chance_of_survival_with_ventilation +
+        vig_age +
+        vig_weight +
+        vig_ventilation_status +
+        vig_children +
+        vig_disability +
+        vig_volunteer_work +
+        vig_vaccination_status +
+        (1 | id),
+      data = .
+    ) %>%
+      marginal_means_all(.)) %>%
+  bind_rows(.id = "group") %>%
+  as_tibble() %>%
+  mutate(
+    x = factor(x,
+      levels = c(
+        "20% chance of survival",
+        "50% chance of survival",
+        "80% chance of survival",
+        "25 years old",
+        "50 years old",
+        "75 years old",
+        "Has no disability",
+        "Has a disability",
+        "Not overweight",
+        "Overweight",
+        "Not ventilated yet",
+        "Is already ventilated",
+        "Does not volunteer work",
+        "Does volunteer work",
+        "Has no children",
+        "Has children",
+        "Unvaccinated",
+        "Vaccinated"
+      )
+    ),
+    x = fct_rev(x)
+  ) %>%
+  ggplot(mapping = aes(
+    x = predicted,
+    y = x,
+    xmin = conf.low,
+    xmax = conf.high,
+    color = group
+  )) +
+  geom_point(position = position_dodge(0.9)) +
+  geom_errorbar(position = position_dodge(0.9)) +
+  geom_vline(
+    xintercept = 0.5,
+    linetype = "dashed"
+  ) +
+  scale_color_manual(values = c("darkgrey", "black")) +
+  scale_x_continuous(breaks = seq(0.3, 0.7, by = 0.1)) +
+  labs(
+    x = "Average marginal means",
+    y = "",
+    color = "Participant vaccination status"
+  ) +
+  theme_minimal() +
+  theme(
+    text = element_text(
+      family = "serif",
+      size = 12
+    ),
+    legend.position = "bottom",
+    legend.background = element_blank(),
+    legend.box.background = element_rect(colour = "black")
+  )
+```
+
+### Regression output
+
+```{r}
+#| label: reg-output
+#| message: false
+#| warning: false
+
+df_triage_final %>%
+  filter(
+    vig_set <= 5,
+    time >= 5,
+    bot_all,
+    !is.na(vacc)
+  ) %>%
+  mutate(
+    vacc = factor(vacc,
+      levels = c("No", "Yes"),
+      labels = c("Unvaccinated", "Vaccinated")
+    ),
+    vig_vaccination_status = factor(vig_vaccination_status,
+      levels = c("Is not vaccinated", "Is vaccinated"),
+      labels = c("Unvaccinated", "Vaccinated")
+    )
+  ) %>%
+  split(.$vacc) %>%
+  map(~
+    lmer(
+      formula = vig_choice ~ vig_chance_of_survival_with_ventilation +
+        vig_age +
+        vig_weight +
+        vig_ventilation_status +
+        vig_children +
+        vig_disability +
+        vig_volunteer_work +
+        vig_vaccination_status +
+        (1 | id),
+      data = .
+    ) %>%
+      marginal_means_all(.)) %>%
+  bind_rows(.id = "group") %>%
+  as_tibble() %>%
+  mutate(
+    x = factor(x,
+      levels = c(
+        "20% chance of survival",
+        "50% chance of survival",
+        "80% chance of survival",
+        "25 years old",
+        "50 years old",
+        "75 years old",
+        "Has no disability",
+        "Has a disability",
+        "Not overweight",
+        "Overweight",
+        "Not ventilated yet",
+        "Is already ventilated",
+        "Does not volunteer work",
+        "Does volunteer work",
+        "Has no children",
+        "Has children",
+        "Unvaccinated",
+        "Vaccinated"
+      )
+    ),
+    x = fct_rev(x)
+  )
+```
+
+
+## Figure 3
+
+```{r}
+#| label: fig3
+#| message: false
+#| warning: false
+
+df_triage_final %>%
+  filter(
+    vig_set <= 5,
+    time >= 5, bot_all,
+    !is.na(vacc)
+  ) %>%
+  mutate(
+    vacc = factor(vacc,
+      levels = c("No", "Yes"),
+      labels = c("Unvaccinated", "Vaccinated")
+    ),
+    vig_vaccinated = factor(vig_vaccination_status,
+      levels = c("Is not vaccinated", "Is vaccinated"),
+      labels = c("Unvaccinated", "Vaccinated")
+    ),
+    vig_unvaccinated = fct_rev(vig_vaccinated),
+    vig_x = case_when(vig_vaccinated == "Vaccinated" & vacc == "Vaccinated" ~ "Ingroup",
+      vig_unvaccinated == "Unvaccinated" & vacc == "Unvaccinated" ~ "Ingroup",
+      .default = "Outgroup"
+    ),
+    vig_x = factor(vig_x,
+      levels = c("Outgroup", "Ingroup")
+    )
+  ) %>%
+  lmer(
+    formula = vig_choice ~ vig_chance_of_survival_with_ventilation +
+      vig_age +
+      vig_weight +
+      vig_ventilation_status +
+      vig_children +
+      vig_disability +
+      vig_volunteer_work +
+      vig_x * vacc +
+      (1 | id),
+    data = .
+  ) %>%
+  ggeffects::predict_response(
+    margin = "empirical",
+    terms = c("vig_x", "vacc")
+  ) %>%
+  ggplot(mapping = aes(
+    x = group,
+    y = predicted,
+    color = x,
+    group = x,
+    ymin = conf.low,
+    ymax = conf.high
+  )) +
+  geom_point(position = position_dodge(width = 0.2)) +
+  geom_errorbar(
+    width = 0.2,
+    position = position_dodge(width = 0.2)
+  ) +
+  geom_line(
+    position = position_dodge(width = 0.2),
+    linetype = "dashed"
+  ) +
+  # scale_color_manual(values = c("grey", "darkgrey", "black")) +
+  scale_color_manual(values = c("darkgrey", "black")) +
+  scale_y_continuous(breaks = seq(0.4, 0.6, by = 0.01)) +
+  labs(
+    x = "Participant vaccination status",
+    y = "Average predicted probabilties",
+    color = "Patient vaccination status"
+  ) +
+  theme_minimal() +
+  theme(
+    text = element_text(
+      family = "serif",
+      size = 12
+    ),
+    legend.position = c(0.9, 0.5),
+    legend.background = element_rect(
+      fill = "white",
+      color = "black"
+    ),
+    legend.box.background = element_rect(colour = "black"),
+    legend.title = element_blank()
+  )
+```
+
+### Regression output
+
+```{r}
+#| label: regression-tbl
+#| message: false
+#| warning: false
+
+df_triage_final %>%
+  filter(vig_set <= 5,
+         time >= 5, bot_all,
+         !is.na(vacc)
+         ) %>%
+  mutate(
+    vacc = factor(vacc,
+      levels = c("No", "Yes"),
+      labels = c("Unvaccinated", "Vaccinated")
+    ),
+    vig_vaccinated = factor(vig_vaccination_status,
+      levels = c("Is not vaccinated", "Is vaccinated"),
+      labels = c("Unvaccinated", "Vaccinated")
+    ),
+    vig_unvaccinated = fct_rev(vig_vaccinated),
+    vig_x = case_when(vig_vaccinated == "Vaccinated" & vacc == "Vaccinated" ~ "Ingroup",
+      vig_unvaccinated == "Unvaccinated" & vacc == "Unvaccinated" ~ "Ingroup",
+      .default = "Outgroup"
+    ),
+    vig_x = factor(vig_x,
+      levels = c("Outgroup", "Ingroup")
+    )
+  ) %>%
+  lmer(
+    formula = vig_choice ~ vig_chance_of_survival_with_ventilation +
+      vig_age +
+      vig_disability +
+      vig_weight +
+      vig_ventilation_status +
+      vig_volunteer_work +
+      vig_children +
+      vig_x * vacc +
+      (1 | id),
+    data = .
+  ) %>%
+  broom.mixed::tidy(., conf.int = TRUE)
+
+```
+
